@@ -79,13 +79,6 @@ npm run dev
 ```
 *Client runs at http://localhost:5173*
 
-## 🔑 Default Credentials
-
-| Role | Username | Password |
-|------|----------|----------|
-| **Admin** | `admin` | `admin123` |
-| **Agency** | `agency` | `agency123` |
-
 ## 📂 Project Structure
 
 ```
