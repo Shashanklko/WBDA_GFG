@@ -1,0 +1,14 @@
+# Node
+node_modules/
+dist/
+.env
+.DS_Store
+
+# Python
+__pycache__/
+venv/
+*.pyc
+.pytest_cache/
+
+# Data (Optional: exclude large datasets if needed, but keeping for now per project type)
+# backend/data/ 
