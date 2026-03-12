@@ -1,4 +1,5 @@
 import asyncio
+import certifi
 from motor.motor_asyncio import AsyncIOMotorDatabase, AsyncIOMotorClient
 from app.db.session import get_next_id
 from app.core.config import settings
@@ -99,7 +100,8 @@ def generate_synthetic_data():
     print("Generated synthetic dataset at data/water_quality_dataset.csv")
 
 async def main():
-    client = AsyncIOMotorClient(settings.MONGODB_URL)
+    ca = certifi.where()
+    client = AsyncIOMotorClient(settings.MONGODB_URL, tlsCAFile=ca)
     db = client[settings.DATABASE_NAME]
     try:
         print("Seeding database users...")
