@@ -26,7 +26,7 @@ class User(UserBase):
     role: str
     agency_id: Optional[int]
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 # Agency
 class AgencyBase(BaseModel):
@@ -41,7 +41,7 @@ class AgencyCreate(AgencyBase):
 class Agency(AgencyBase):
     id: int
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 # Dataset
 class Dataset(BaseModel):
@@ -49,7 +49,7 @@ class Dataset(BaseModel):
     filename: str
     uploaded_at: datetime
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 # Training Log
 class TrainingLog(BaseModel):
@@ -60,7 +60,7 @@ class TrainingLog(BaseModel):
     feature_importance: Optional[str] # JSON string
     created_at: datetime
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 # ML / Dashboard
 class PredictionRequest(BaseModel):
@@ -105,7 +105,7 @@ class ActivityLogResponse(BaseModel):
     ip_address: Optional[str] = None
     created_at: datetime
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class UserDetailResponse(BaseModel):
     id: int
@@ -114,7 +114,7 @@ class UserDetailResponse(BaseModel):
     agency_id: Optional[int] = None
     agency_name: Optional[str] = None
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class AgencyDetailResponse(BaseModel):
     id: int
@@ -124,4 +124,4 @@ class AgencyDetailResponse(BaseModel):
     user_count: int = 0
     dataset_count: int = 0
     class Config:
-        orm_mode = True
+        from_attributes = True

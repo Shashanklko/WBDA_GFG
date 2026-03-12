@@ -1,18 +1,16 @@
-from sqlalchemy import create_engine
+import asyncio
+from motor.motor_asyncio import AsyncIOMotorClient
 from app.core.config import settings
-from app.db.models import Base
-from sqlalchemy_utils import database_exists, create_database
 
-def init_db():
-    engine = create_engine(settings.DATABASE_URL)
-    if not database_exists(engine.url):
-        create_database(engine.url)
-        print(f"Created database {settings.DATABASE_URL}")
-    else:
-        print(f"Database {settings.DATABASE_URL} already exists")
-
-    Base.metadata.create_all(bind=engine)
-    print("Tables created.")
+async def init_db():
+    try:
+        client = AsyncIOMotorClient(settings.MONGODB_URL)
+        # The is_master command is cheap and does not require auth.
+        await client.admin.command('ismaster')
+        print(f"Successfully connected to MongoDB at {settings.MONGODB_URL}")
+        print(f"Database: {settings.DATABASE_NAME}")
+    except Exception as e:
+        print(f"Error connecting to MongoDB: {e}")
 
 if __name__ == "__main__":
-    init_db()
+    asyncio.run(init_db())

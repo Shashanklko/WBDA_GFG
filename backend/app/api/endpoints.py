@@ -1,8 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
-from sqlalchemy.orm import Session
+from motor.motor_asyncio import AsyncIOMotorDatabase
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from app.db.session import get_db
-from app.db.models import User, Agency, Dataset, TrainingLog, ActivityLog
+from app.db.session import get_db, get_next_id
 from app.schemas import schemas
 from app.core import security
 from app.ml.engine import ml_engine
@@ -11,20 +10,27 @@ import shutil
 import os
 import json
 import logging
+from datetime import datetime
 
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 # --- Auth ---
 @router.post("/token", response_model=schemas.Token)
-def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == form_data.username).first()
-    if not user or not security.verify_password(form_data.password, user.hashed_password):
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncIOMotorDatabase = Depends(get_db)):
+    user = await db["users"].find_one({"username": form_data.username})
+    if not user or not security.verify_password(form_data.password, user["hashed_password"]):
         # Log failed login attempt if user exists
         if user:
-            log = ActivityLog(user_id=user.id, action="login", details="Failed login attempt", status="failed")
-            db.add(log)
-            db.commit()
+            log = {
+                "id": await get_next_id("activity_logs"),
+                "user_id": user["id"],
+                "action": "login",
+                "details": "Failed login attempt",
+                "status": "failed",
+                "created_at": datetime.utcnow()
+            }
+            await db["activity_logs"].insert_one(log)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -32,14 +38,20 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db:
         )
     
     # Log successful login
-    log = ActivityLog(user_id=user.id, action="login", details="User logged in successfully", status="success")
-    db.add(log)
-    db.commit()
+    log = {
+        "id": await get_next_id("activity_logs"),
+        "user_id": user["id"],
+        "action": "login",
+        "details": "User logged in successfully",
+        "status": "success",
+        "created_at": datetime.utcnow()
+    }
+    await db["activity_logs"].insert_one(log)
     
-    access_token = security.create_access_token(data={"sub": user.username, "role": user.role})
-    return {"access_token": access_token, "token_type": "bearer", "role": user.role}
+    access_token = security.create_access_token(data={"sub": user["username"], "role": user["role"]})
+    return {"access_token": access_token, "token_type": "bearer", "role": user["role"]}
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncIOMotorDatabase = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -52,22 +64,25 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
             raise credentials_exception
     except security.jwt.JWTError:
         raise credentials_exception
-    user = db.query(User).filter(User.username == username).first()
+    user = await db["users"].find_one({"username": username})
     if user is None:
         raise credentials_exception
     return user
 
-def get_active_dataset_path(db: Session):
+async def get_active_dataset_path(db: AsyncIOMotorDatabase):
     # Find the latest successfully trained dataset
-    last_training = db.query(TrainingLog).filter(TrainingLog.status == "Success").order_by(TrainingLog.created_at.desc()).first()
+    last_training = await db["training_logs"].find_one(
+        {"status": "Success"},
+        sort=[("created_at", -1)]
+    )
     
     project_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")
     default_path = os.path.join(project_root, "data", "water_quality_dataset.csv")
 
     if last_training:
-        dataset = db.query(Dataset).filter(Dataset.id == last_training.dataset_id).first()
+        dataset = await db["datasets"].find_one({"id": last_training["dataset_id"]})
         if dataset:
-            candidate_path = os.path.join(project_root, "data", dataset.filename)
+            candidate_path = os.path.join(project_root, "data", dataset["filename"])
             if os.path.exists(candidate_path):
                 return candidate_path
     
@@ -75,11 +90,10 @@ def get_active_dataset_path(db: Session):
 
 # --- Public / Dashboard ---
 @router.get("/public/summary", response_model=schemas.DashboardSummary)
-def get_dashboard_summary(db: Session = Depends(get_db)):
+async def get_dashboard_summary(db: AsyncIOMotorDatabase = Depends(get_db)):
     # Load data from latest CSV if available, or use ML engine data
-    # For speed, let's use the ML engine's loaded dataframe if possible, else read default
     try:
-        csv_path = get_active_dataset_path(db)
+        csv_path = await get_active_dataset_path(db)
         df = ml_engine.load_data(csv_path)
         
         # Calculate heuristics
@@ -125,9 +139,9 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
         }
 
 @router.get("/public/chart-data")
-def get_chart_data(country: str = None, db: Session = Depends(get_db)):
+async def get_chart_data(country: str = None, db: AsyncIOMotorDatabase = Depends(get_db)):
     try:
-        csv_path = get_active_dataset_path(db)
+        csv_path = await get_active_dataset_path(db)
         df = ml_engine.load_data(csv_path)
         
         # Determine strict or fuzzy match for country if provided
@@ -283,13 +297,13 @@ def predict_risk(request: schemas.PredictionRequest):
     return res[0]
 
 @router.get("/public/country/{country_name}", response_model=schemas.CountryInsight)
-def get_country_details(country_name: str, db: Session = Depends(get_db)):
+async def get_country_details(country_name: str, db: AsyncIOMotorDatabase = Depends(get_db)):
     try:
         # Resolve path - reusing logic from MLEngine would be cleaner, but for now direct load via engine helper
         # better to add a method in engine or just access the loaded df if we made it stateful?
         # Engine reloads every time currently in 'load_data'. Let's use load_data.
         
-        csv_path = get_active_dataset_path(db)
+        csv_path = await get_active_dataset_path(db)
         
         # We need a robust way to get data. accessing ml_engine.predict implies model logic.
         # Let's use pandas directly here for stats.
@@ -340,17 +354,11 @@ def get_country_details(country_name: str, db: Session = Depends(get_db)):
 
 # --- Agency ---
 @router.post("/agency/upload")
-def upload_dataset(file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if current_user.role != "agency":
+async def upload_dataset(file: UploadFile = File(...), current_user: dict = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    if current_user["role"] != "agency":
         raise HTTPException(status_code=403, detail="Not authorized")
     
     # Resolve data directory
-    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) # .../backend/app -> .../backend -> .../wbda (wait, app/api/endpoints.py -> app/api -> app -> backend -> wbda? No.
-    # endpoints.py is in backend/app/api.
-    # os.path.dirname(__file__) = backend/app/api
-    # .. = backend/app
-    # .. = backend
-    # .. = wbda (Root)
     project_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")
     
     file_location = os.path.join(project_root, "data", file.filename)
@@ -361,24 +369,28 @@ def upload_dataset(file: UploadFile = File(...), current_user: User = Depends(ge
         shutil.copyfileobj(file.file, file_object)
     
     # Save to DB
-    dataset = Dataset(filename=file.filename, agency_id=current_user.agency_id)
-    db.add(dataset)
-    db.commit()
-    db.refresh(dataset)
+    dataset_id = await get_next_id("datasets")
+    dataset = {
+        "id": dataset_id,
+        "filename": file.filename,
+        "agency_id": current_user["agency_id"],
+        "uploaded_at": datetime.utcnow()
+    }
+    await db["datasets"].insert_one(dataset)
     
-    return {"message": "File uploaded successfully", "dataset_id": dataset.id}
+    return {"message": "File uploaded successfully", "dataset_id": dataset_id}
 
 @router.post("/agency/train/{dataset_id}")
-def train_model(dataset_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if current_user.role != "agency":
+async def train_model(dataset_id: int, current_user: dict = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    if current_user["role"] != "agency":
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    dataset = await db["datasets"].find_one({"id": dataset_id})
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
         
     project_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")
-    csv_path = os.path.join(project_root, "data", dataset.filename)
+    csv_path = os.path.join(project_root, "data", dataset["filename"])
     
     if not os.path.exists(csv_path):
         raise HTTPException(status_code=404, detail="File not found on server")
@@ -388,159 +400,178 @@ def train_model(dataset_id: int, current_user: User = Depends(get_current_user),
         score, importances = ml_engine.train(csv_path)
         
         # Log result
-        log = TrainingLog(
-            dataset_id=dataset.id,
-            status="Success",
-            accuracy=score,
-            feature_importance=json.dumps(importances)
-        )
-        db.add(log)
-        db.commit()
+        log_id = await get_next_id("training_logs")
+        log = {
+            "id": log_id,
+            "dataset_id": dataset["id"],
+            "status": "Success",
+            "accuracy": score,
+            "feature_importance": json.dumps(importances),
+            "created_at": datetime.utcnow()
+        }
+        await db["training_logs"].insert_one(log)
         
         return {"message": "Training complete", "accuracy": score}
     except Exception as e:
-        log = TrainingLog(dataset_id=dataset.id, status="Failed", feature_importance=str(e))
-        db.add(log)
-        db.commit()
+        log_id = await get_next_id("training_logs")
+        log = {
+            "id": log_id,
+            "dataset_id": dataset["id"],
+            "status": "Failed",
+            "feature_importance": str(e),
+            "created_at": datetime.utcnow()
+        }
+        await db["training_logs"].insert_one(log)
         raise HTTPException(status_code=500, detail=str(e))
 
 # --- Admin ---
 @router.post("/admin/agencies", response_model=schemas.Agency)
-def create_agency(agency: schemas.AgencyCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if current_user.role != "admin":
+async def create_agency(agency: schemas.AgencyCreate, current_user: dict = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    if current_user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Not authorized")
     
     # Check if username exists if provided
     if agency.admin_username:
-        existing_user = db.query(User).filter(User.username == agency.admin_username).first()
+        existing_user = await db["users"].find_one({"username": agency.admin_username})
         if existing_user:
             raise HTTPException(status_code=400, detail="Username already exists")
             
     # Create Agency
-    db_agency = Agency(name=agency.name, location=agency.location, contact_info=agency.contact_info)
-    db.add(db_agency)
-    db.commit()
-    db.refresh(db_agency)
+    agency_id = await get_next_id("agencies")
+    db_agency = {
+        "id": agency_id,
+        "name": agency.name,
+        "location": agency.location,
+        "contact_info": agency.contact_info
+    }
+    await db["agencies"].insert_one(db_agency)
     
     # Create User if requested
     if agency.admin_username and agency.admin_password:
         hashed_pw = security.get_password_hash(agency.admin_password)
-        new_user = User(
-            username=agency.admin_username,
-            hashed_password=hashed_pw,
-            role="agency",
-            agency_id=db_agency.id
-        )
-        db.add(new_user)
-        db.commit()
+        user_id = await get_next_id("users")
+        new_user = {
+            "id": user_id,
+            "username": agency.admin_username,
+            "hashed_password": hashed_pw,
+            "role": "agency",
+            "agency_id": agency_id
+        }
+        await db["users"].insert_one(new_user)
         
     return db_agency
 
 
 @router.get("/admin/agencies", response_model=List[schemas.AgencyDetailResponse])
-def list_agencies(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if current_user.role != "admin":
+async def list_agencies(current_user: dict = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    if current_user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    agencies = db.query(Agency).all()
+    agencies = await db["agencies"].find().to_list(length=100)
     result = []
     for agency in agencies:
+        user_count = await db["users"].count_documents({"agency_id": agency["id"]})
+        dataset_count = await db["datasets"].count_documents({"agency_id": agency["id"]})
         result.append({
-            "id": agency.id,
-            "name": agency.name,
-            "location": agency.location,
-            "contact_info": agency.contact_info,
-            "user_count": len(agency.users),
-            "dataset_count": len(agency.datasets)
+            "id": agency["id"],
+            "name": agency["name"],
+            "location": agency.get("location"),
+            "contact_info": agency.get("contact_info"),
+            "user_count": user_count,
+            "dataset_count": dataset_count
         })
     return result
 
 
 @router.delete("/admin/agencies/{agency_id}")
-def delete_agency(agency_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if current_user.role != "admin":
+async def delete_agency(agency_id: int, current_user: dict = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    if current_user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    agency = db.query(Agency).filter(Agency.id == agency_id).first()
+    agency = await db["agencies"].find_one({"id": agency_id})
     if not agency:
         raise HTTPException(status_code=404, detail="Agency not found")
     
     # Delete related users and datasets
-    db.query(User).filter(User.agency_id == agency_id).delete()
-    db.query(Dataset).filter(Dataset.agency_id == agency_id).delete()
-    db.delete(agency)
-    db.commit()
+    await db["users"].delete_many({"agency_id": agency_id})
+    await db["datasets"].delete_many({"agency_id": agency_id})
+    await db["agencies"].delete_one({"id": agency_id})
     
-    return {"message": f"Agency {agency.name} deleted successfully"}
+    return {"message": f"Agency {agency['name']} deleted successfully"}
 
 
 @router.get("/admin/users", response_model=List[schemas.UserDetailResponse])
-def list_users(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if current_user.role != "admin":
+async def list_users(current_user: dict = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    if current_user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    users = db.query(User).all()
+    users = await db["users"].find().to_list(length=100)
     result = []
     for user in users:
+        agency_name = None
+        if user.get("agency_id"):
+            agency = await db["agencies"].find_one({"id": user["agency_id"]})
+            if agency:
+                agency_name = agency["name"]
+        
         result.append({
-            "id": user.id,
-            "username": user.username,
-            "role": user.role,
-            "agency_id": user.agency_id,
-            "agency_name": user.agency.name if user.agency else None
+            "id": user["id"],
+            "username": user["username"],
+            "role": user["role"],
+            "agency_id": user.get("agency_id"),
+            "agency_name": agency_name
         })
     return result
 
 
 @router.delete("/admin/users/{user_id}")
-def delete_user(user_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if current_user.role != "admin":
+async def delete_user(user_id: int, current_user: dict = Depends(get_current_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    if current_user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    user = db.query(User).filter(User.id == user_id).first()
+    user = await db["users"].find_one({"id": user_id})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
     # Prevent deleting self
-    if user.id == current_user.id:
+    if user["id"] == current_user["id"]:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
     
     # Delete related activity logs
-    db.query(ActivityLog).filter(ActivityLog.user_id == user.id).delete()
+    await db["activity_logs"].delete_many({"user_id": user_id})
+    await db["users"].delete_one({"id": user_id})
     
-    db.delete(user)
-    db.commit()
-    
-    return {"message": f"User {user.username} deleted successfully"}
+    return {"message": f"User {user['username']} deleted successfully"}
 
 
 @router.get("/admin/activity-logs", response_model=List[schemas.ActivityLogResponse])
-def get_activity_logs(
+async def get_activity_logs(
     limit: int = 100,
     action: str = None,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db)
 ):
-    if current_user.role != "admin":
+    if current_user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    query = db.query(ActivityLog).join(User)
-    
+    query = {}
     if action:
-        query = query.filter(ActivityLog.action == action)
+        query["action"] = action
     
-    logs = query.order_by(ActivityLog.created_at.desc()).limit(limit).all()
+    logs = await db["activity_logs"].find(query).sort("created_at", -1).limit(limit).to_list(length=limit)
     
     result = []
     for log in logs:
+        # Get username for log
+        user = await db["users"].find_one({"id": log["user_id"]})
         result.append({
-            "id": log.id,
-            "user_id": log.user_id,
-            "username": log.user.username,
-            "action": log.action,
-            "details": log.details,
-            "status": log.status,
-            "ip_address": log.ip_address,
-            "created_at": log.created_at
+            "id": log["id"],
+            "user_id": log["user_id"],
+            "username": user["username"] if user else "Unknown",
+            "action": log["action"],
+            "details": log.get("details"),
+            "status": log["status"],
+            "ip_address": log.get("ip_address"),
+            "created_at": log["created_at"]
         })
     return result

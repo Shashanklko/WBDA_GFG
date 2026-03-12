@@ -1,51 +1,54 @@
-from sqlalchemy.orm import Session
-from app.db.session import SessionLocal, engine
-from app.db.models import User, Agency
+import asyncio
+from motor.motor_asyncio import AsyncIOMotorDatabase, AsyncIOMotorClient
+from app.db.session import get_next_id
+from app.core.config import settings
 from app.core.security import get_password_hash
-from app.db.models import Base
 import pandas as pd
 import numpy as np
 import os
 import random
 
-def seed_users(db: Session):
+async def seed_users(db: AsyncIOMotorDatabase):
     # Check if admin exists
-    admin = db.query(User).filter(User.username == "admin").first()
+    admin = await db["users"].find_one({"username": "admin"})
     if not admin:
-        admin_user = User(
-            username="admin",
-            hashed_password=get_password_hash("admin123"),
-            role="admin"
-        )
-        db.add(admin_user)
+        admin_user = {
+            "id": await get_next_id("users"),
+            "username": "admin",
+            "hashed_password": get_password_hash("admin123"),
+            "role": "admin"
+        }
+        await db["users"].insert_one(admin_user)
         print("Created Admin user (admin/admin123)")
 
     # Create Agency
-    agency = db.query(Agency).filter(Agency.name == "Clean Water Authority").first()
+    agency = await db["agencies"].find_one({"name": "Clean Water Authority"})
     if not agency:
-        agency = Agency(
-            name="Clean Water Authority",
-            location="Metropolis",
-            contact_info="contact@cleanwater.org"
-        )
-        db.add(agency)
-        db.commit()
-        db.refresh(agency)
-        print("Created Agency 'Clean Water Authority'")
+        agency_id = await get_next_id("agencies")
+        agency = {
+            "id": agency_id,
+            "name": "Clean Water Authority",
+            "location": "Metropolis",
+            "contact_info": "contact@cleanwater.org"
+        }
+        await db["agencies"].insert_one(agency)
+        print(f"Created Agency 'Clean Water Authority' (ID: {agency_id})")
+    else:
+        agency_id = agency["id"]
 
     # Create Agency User
-    agency_user = db.query(User).filter(User.username == "agency").first()
+    agency_user = await db["users"].find_one({"username": "agency"})
     if not agency_user:
-        agency_user = User(
-            username="agency",
-            hashed_password=get_password_hash("agency123"),
-            role="agency",
-            agency_id=agency.id
-        )
-        db.add(agency_user)
+        user_id = await get_next_id("users")
+        agency_user = {
+            "id": user_id,
+            "username": "agency",
+            "hashed_password": get_password_hash("agency123"),
+            "role": "agency",
+            "agency_id": agency_id
+        }
+        await db["users"].insert_one(agency_user)
         print("Created Agency user (agency/agency123)")
-    
-    db.commit()
 
 def generate_synthetic_data():
     num_rows = 1000
@@ -95,12 +98,15 @@ def generate_synthetic_data():
     df.to_csv("data/water_quality_dataset.csv", index=False)
     print("Generated synthetic dataset at data/water_quality_dataset.csv")
 
-if __name__ == "__main__":
-    db = SessionLocal()
+async def main():
+    client = AsyncIOMotorClient(settings.MONGODB_URL)
+    db = client[settings.DATABASE_NAME]
     try:
-        print("Creating database tables...")
-        Base.metadata.create_all(bind=engine)
-        seed_users(db)
+        print("Seeding database users...")
+        await seed_users(db)
         generate_synthetic_data()
     finally:
-        db.close()
+        client.close()
+
+if __name__ == "__main__":
+    asyncio.run(main())

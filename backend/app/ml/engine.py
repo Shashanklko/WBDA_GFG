@@ -7,8 +7,9 @@ from sklearn.impute import SimpleImputer
 import pickle
 import os
 
-MODEL_PATH = "backend/app/ml/model.pkl"
-ENCODERS_PATH = "backend/app/ml/encoders.pkl"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "model.pkl")
+ENCODERS_PATH = os.path.join(BASE_DIR, "encoders.pkl")
 
 class MLEngine:
     def __init__(self):

@@ -1,7 +1,7 @@
 @echo off
 echo ========================================================
 echo Water Quality & Public Health Risk Assessment Platform
-echo Installation & Start Script
+echo Installation
 echo ========================================================
 
 echo.
